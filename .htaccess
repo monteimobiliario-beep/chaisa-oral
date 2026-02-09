@@ -1,0 +1,15 @@
+
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteBase /
+  
+  # Força o reconhecimento de arquivos TS/TSX como JS para o navegador
+  AddType application/javascript .ts
+  AddType application/javascript .tsx
+
+  # Redireciona tudo para o index.html se o arquivo físico não existir
+  RewriteRule ^index\.html$ - [L]
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+  RewriteRule . /index.html [L]
+</IfModule>

@@ -1,0 +1,8 @@
+{
+  "name": "Copy of Copy of Oral-Gen Genealogy Assistant",
+  "description": "An AI-powered system to transcribe handwritten genealogical interview forms into structured data for FamilySearch Oral-Gen, featuring OCR review, Voice Input, and CSV/JSON/GEDCOM export.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
