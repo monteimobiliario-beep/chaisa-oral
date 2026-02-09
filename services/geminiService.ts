@@ -18,20 +18,28 @@ const processDocumentBatch = async (
     inlineData: { mimeType: file.mimeType, data: file.data }
   }));
 
-  const prompt = `Você é um perito em transcrição de genealogia para o formulário MZ11. 
-O documento possui 3 páginas com 25 linhas cada (Total 75 registros).
+  const prompt = `Você é um especialista em transcrição de genealogia focado no formulário Oral-Gen MZ11.
+O documento consiste em 3 PÁGINAS contendo uma tabela repetida com 25 linhas cada (Total de 75 registros possíveis).
 
-REGRAS DE EXTRAÇÃO RELACIONAL (CRÍTICO):
-1. RIN (Record Identification Number): Identifique o número da linha de 1 a 75.
-2. CÓDIGOS DE RELAÇÃO (Coluna eBuild):
-   - C<n>: Cônjuge do RIN <n>. Ex: "C1 Tereza" (Tereza é esposa do RIN 1).
-   - F<n>,<m>: Filho do casal formado por RIN <n> e RIN <m>. Ex: "F1,2 Paulo" (Paulo é filho de 1 e 2).
-   - P<k>: Progenitor do RIN <k>. Ex: "P5 Manuel" (Manuel é pai/mãe de 5).
-3. TRATAMENTO DE DADOS AUSENTES:
-   - Se um campo (data, local, nome) estiver vazio no papel, deixe-o VAZIO (string vazia ""). 
-   - NÃO insira palavras como "null", "desconhecido" ou "não informado".
-4. LOCAIS (Ditto Marks): Se houver aspas (") na coluna de local, use o local da linha imediatamente anterior.
-5. TOTALIDADE: Extraia todos os nomes de todas as páginas enviadas.
+O QUE PROCURAR E COMO EXTRAIR:
+1. MAPEAMENTO DE PÁGINAS:
+   - Página 1: Linhas (RIN) 1 a 25.
+   - Página 2: Linhas (RIN) 26 a 50.
+   - Página 3: Linhas (RIN) 51 a 75.
+   - Ignore cabeçalhos repetidos em cada página, mas use-os para alinhar as colunas.
+
+2. COLUNAS DA TABELA:
+   - RIN: Número identificador da linha.
+   - eBuild (Relação): Códigos como C<n> (Cônjuge de n), F<n>,<m> (Filho de n e m), P<k> (Progenitor de k).
+   - Nome Completo: O nome da pessoa.
+   - Sexo: M ou F.
+   - Nascimento (Data e Local): Extraia ambos. Se houver aspas (") no local, repita o local da linha de cima.
+   - Falecimento (Data e Local): Extraia se disponível.
+
+3. REGRAS CRÍTICAS:
+   - Preserve a numeração exata (RIN). Se a linha 32 está na página 2, ela deve ter RIN 32.
+   - DITTO MARKS: Aspas (") significam repetição do dado imediatamente acima na mesma coluna.
+   - FORMATO: Retorne apenas o JSON estruturado conforme o esquema.
 
 Retorne JSON estrito com o campo 'individuals'.`;
 
@@ -97,7 +105,7 @@ export const extractDataFromImages = async (
     const result = await processDocumentBatch(files);
     
     if (!result.individuals || result.individuals.length === 0) {
-      throw new Error("Nenhum dado encontrado.");
+      throw new Error("Nenhum dado encontrado no formulário.");
     }
 
     let lastBPlace = "";
@@ -112,9 +120,12 @@ export const extractDataFromImages = async (
       if (dPlace === '"' || dPlace.toLowerCase() === 'ditto') dPlace = lastDPlace;
       else if (dPlace) lastDPlace = dPlace;
 
+      // Garantir o RIN correto baseado na posição se a IA falhar na detecção numérica
+      const calculatedRin = ind.rin || (idx + 1);
+
       return {
         id: `ind-${idx}-${Date.now()}`,
-        rin: ind.rin || (idx + 1),
+        rin: calculatedRin,
         fullName: (ind.fullName || "").trim(),
         relation: (ind.relation || "").trim(),
         birthDate: (ind.birthDate || "").trim(),
@@ -122,8 +133,8 @@ export const extractDataFromImages = async (
         deathDate: (ind.deathDate || "").trim(),
         deathPlace: dPlace,
         sex: (ind.sex || "").trim(), 
-        page: ind.page || (Math.floor(idx / 25) + 1),
-        row: (idx % 25) + 1,
+        page: ind.page || (Math.floor((calculatedRin - 1) / 25) + 1),
+        row: ((calculatedRin - 1) % 25) + 1,
         confidence: 0.99,
         isDitto: ind.birthPlace === '"' || ind.deathPlace === '"'
       };
@@ -132,7 +143,7 @@ export const extractDataFromImages = async (
     return {
       metadata: {
         interviewId: `MZ11-${Date.now().toString().slice(-4)}`,
-        intervieweeName: processed[0]?.fullName || "",
+        intervieweeName: processed[0]?.fullName || "Entrevistado Principal",
         interviewDate: new Date().toLocaleDateString(),
         interviewPlace: "",
         intervieweeRin: "1",
