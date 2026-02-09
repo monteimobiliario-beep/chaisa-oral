@@ -19,10 +19,23 @@ const App: React.FC = () => {
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
   const [processingProgress, setProcessingProgress] = useState({ current: 0, total: 0 });
+  const [hasApiKey, setHasApiKey] = useState<boolean | null>(null);
   
   const isInitializing = useRef(true);
 
   useEffect(() => {
+    // Verificar se já existe uma chave API selecionada
+    const checkApiKey = async () => {
+      if (window.aistudio && typeof window.aistudio.hasSelectedApiKey === 'function') {
+        const hasKey = await window.aistudio.hasSelectedApiKey();
+        setHasApiKey(hasKey);
+      } else {
+        // Fallback para ambientes onde o aistudio não está injetado (assume true se process.env.API_KEY existir)
+        setHasApiKey(!!process.env.API_KEY);
+      }
+    };
+    checkApiKey();
+
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (session?.user) setUser({ id: session.user.id, email: session.user.email });
     });
@@ -87,6 +100,14 @@ const App: React.FC = () => {
       localStorage.removeItem(key);
     }
   }, [data, appState, currentSessionId, user]);
+
+  const handleSelectApiKey = async () => {
+    if (window.aistudio && typeof window.aistudio.openSelectKey === 'function') {
+      await window.aistudio.openSelectKey();
+      // Assumimos sucesso imediatamente para evitar race conditions
+      setHasApiKey(true);
+    }
+  };
 
   const handleLogout = async () => {
     if (window.confirm("Deseja encerrar sua sessão com segurança?")) {
@@ -172,12 +193,50 @@ const App: React.FC = () => {
       setCurrentSessionId(null);
       setAppState('REVIEW');
     } catch (err: any) {
-      setError(err.message || "Erro durante o processamento de IA.");
+      // Se falhar por causa da API Key mesmo após "seleção", resetamos o estado
+      if (err.message?.includes("Requested entity was not found") || err.message?.includes("API Key")) {
+        setHasApiKey(false);
+        setError("Chave API inválida ou não encontrada. Por favor, selecione novamente.");
+      } else {
+        setError(err.message || "Erro durante o processamento de IA.");
+      }
       setAppState('IDLE');
     }
   };
 
   if (!user) return <Auth />;
+
+  // Se não houver chave API, mostramos a tela de ativação
+  if (hasApiKey === false) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-6 font-sans">
+        <div className="max-w-md w-full bg-white rounded-[3.5rem] p-12 shadow-2xl text-center relative overflow-hidden">
+          <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-blue-600 to-indigo-600"></div>
+          <div className="bg-blue-50 w-20 h-20 rounded-3xl flex items-center justify-center mx-auto mb-8">
+            <svg className="w-10 h-10 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" /></svg>
+          </div>
+          <h2 className="text-3xl font-black text-slate-900 mb-4 tracking-tight uppercase">Ativação Necessária</h2>
+          <p className="text-slate-500 text-sm font-bold leading-relaxed mb-8">
+            Para processar documentos com IA, o sistema requer uma chave API válida de um projeto com faturamento ativo.
+          </p>
+          <button 
+            onClick={handleSelectApiKey}
+            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-black py-5 rounded-3xl shadow-xl transition-all uppercase tracking-widest text-xs active:scale-95 mb-6"
+          >
+            Selecionar Chave API
+          </button>
+          <a 
+            href="https://ai.google.dev/gemini-api/docs/billing" 
+            target="_blank" 
+            rel="noopener noreferrer"
+            className="text-[10px] font-black text-blue-600 uppercase tracking-widest hover:underline"
+          >
+            Ver documentação de faturamento →
+          </a>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col font-sans text-slate-900 overflow-hidden">
