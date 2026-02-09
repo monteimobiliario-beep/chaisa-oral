@@ -4,7 +4,6 @@ import { ProcessedData, FileData, Individual } from "../types";
 
 const MAX_RETRIES = 3;
 const BASE_RETRY_DELAY = 10000;
-const QUOTA_RETRY_DELAY = 62000;
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -12,45 +11,36 @@ const processDocumentBatch = async (
   files: FileData[],
   attempt = 1
 ): Promise<any> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const apiKey = process.env.API_KEY;
+  if (!apiKey) {
+    throw new Error("API Key não encontrada. Verifique a configuração.");
+  }
+
+  const ai = new GoogleGenAI({ apiKey });
 
   const contentParts = files.map(file => ({
     inlineData: { mimeType: file.mimeType, data: file.data }
   }));
 
-  const prompt = `Você é um especialista em transcrição de genealogia focado no formulário Oral-Gen MZ11.
-O documento consiste em 3 PÁGINAS contendo uma tabela repetida com 25 linhas cada (Total de 75 registros possíveis).
+  const prompt = `Você é um especialista em transcrição do formulário genealógico MZ11.
+O documento possui 3 PÁGINAS contendo uma tabela repetida (RIN 1-25, 26-50, 51-75).
 
-O QUE PROCURAR E COMO EXTRAIR:
-1. MAPEAMENTO DE PÁGINAS:
-   - Página 1: Linhas (RIN) 1 a 25.
-   - Página 2: Linhas (RIN) 26 a 50.
-   - Página 3: Linhas (RIN) 51 a 75.
-   - Ignore cabeçalhos repetidos em cada página, mas use-os para alinhar as colunas.
+REGRAS DE EXTRAÇÃO:
+1. COLUNA EBUILD: Transcreva exatamente o código de relação (ex: C1, F2,3, P10). É o dado mais importante.
+2. DITTO MARKS ("): Se houver aspas (") na coluna de local, repita o local da linha anterior.
+3. RIN: Mantenha a numeração exata da linha.
+4. ESTRUTURA: Retorne um JSON com a chave 'individuals'.
 
-2. COLUNAS DA TABELA:
-   - RIN: Número identificador da linha.
-   - eBuild (Relação): Códigos como C<n> (Cônjuge de n), F<n>,<m> (Filho de n e m), P<k> (Progenitor de k).
-   - Nome Completo: O nome da pessoa.
-   - Sexo: M ou F.
-   - Nascimento (Data e Local): Extraia ambos. Se houver aspas (") no local, repita o local da linha de cima.
-   - Falecimento (Data e Local): Extraia se disponível.
-
-3. REGRAS CRÍTICAS:
-   - Preserve a numeração exata (RIN). Se a linha 32 está na página 2, ela deve ter RIN 32.
-   - DITTO MARKS: Aspas (") significam repetição do dado imediatamente acima na mesma coluna.
-   - FORMATO: Retorne apenas o JSON estruturado conforme o esquema.
-
-Retorne JSON estrito com o campo 'individuals'.`;
+MAPEAMENTO:
+- Pág 1 -> RIN 1 a 25
+- Pág 2 -> RIN 26 a 50
+- Pág 3 -> RIN 51 a 75`;
 
   try {
     const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
+      model: 'gemini-3-pro-preview', // Melhor modelo para raciocínio em tabelas complexas
       contents: { 
-        parts: [
-          { text: prompt },
-          ...contentParts
-        ] 
+        parts: [{ text: prompt }, ...contentParts] 
       },
       config: {
         responseMimeType: "application/json",
@@ -72,7 +62,7 @@ Retorne JSON estrito com o campo 'individuals'.`;
                   deathPlace: { type: Type.STRING },
                   page: { type: Type.NUMBER }
                 },
-                required: ["fullName"]
+                required: ["fullName", "rin"]
               }
             }
           }
@@ -80,15 +70,10 @@ Retorne JSON estrito com o campo 'individuals'.`;
       }
     });
 
-    const text = response.text;
-    if (!text) throw new Error("A IA não retornou resposta.");
-    return JSON.parse(text);
-
+    return JSON.parse(response.text || "{}");
   } catch (e: any) {
-    const errorMsg = e.message || String(e);
     if (attempt < MAX_RETRIES) {
-      const delay = errorMsg.includes("429") ? QUOTA_RETRY_DELAY : BASE_RETRY_DELAY;
-      await sleep(delay);
+      await sleep(BASE_RETRY_DELAY);
       return processDocumentBatch(files, attempt + 1);
     }
     throw e;
@@ -100,58 +85,43 @@ export const extractDataFromImages = async (
   onProgress?: (current: number, total: number) => void
 ): Promise<ProcessedData> => {
   if (onProgress) onProgress(1, 1);
+  const result = await processDocumentBatch(files);
+  
+  if (!result.individuals) throw new Error("Falha na extração de dados.");
 
-  try {
-    const result = await processDocumentBatch(files);
-    
-    if (!result.individuals || result.individuals.length === 0) {
-      throw new Error("Nenhum dado encontrado no formulário.");
-    }
+  let lastBPlace = "";
+  let lastDPlace = "";
 
-    let lastBPlace = "";
-    let lastDPlace = "";
+  const processed = result.individuals.map((ind: any, idx: number) => {
+    let bPlace = (ind.birthPlace || "").trim();
+    if (bPlace === '"' || bPlace.toLowerCase() === 'ditto') bPlace = lastBPlace;
+    else if (bPlace) lastBPlace = bPlace;
 
-    const processed = result.individuals.map((ind: any, idx: number) => {
-      let bPlace = (ind.birthPlace || "").trim();
-      if (bPlace === '"' || bPlace.toLowerCase() === 'ditto') bPlace = lastBPlace;
-      else if (bPlace) lastBPlace = bPlace;
+    let dPlace = (ind.deathPlace || "").trim();
+    if (dPlace === '"' || dPlace.toLowerCase() === 'ditto') dPlace = lastDPlace;
+    else if (dPlace) lastDPlace = dPlace;
 
-      let dPlace = (ind.deathPlace || "").trim();
-      if (dPlace === '"' || dPlace.toLowerCase() === 'ditto') dPlace = lastDPlace;
-      else if (dPlace) lastDPlace = dPlace;
-
-      // Garantir o RIN correto baseado na posição se a IA falhar na detecção numérica
-      const calculatedRin = ind.rin || (idx + 1);
-
-      return {
-        id: `ind-${idx}-${Date.now()}`,
-        rin: calculatedRin,
-        fullName: (ind.fullName || "").trim(),
-        relation: (ind.relation || "").trim(),
-        birthDate: (ind.birthDate || "").trim(),
-        birthPlace: bPlace,
-        deathDate: (ind.deathDate || "").trim(),
-        deathPlace: dPlace,
-        sex: (ind.sex || "").trim(), 
-        page: ind.page || (Math.floor((calculatedRin - 1) / 25) + 1),
-        row: ((calculatedRin - 1) % 25) + 1,
-        confidence: 0.99,
-        isDitto: ind.birthPlace === '"' || ind.deathPlace === '"'
-      };
-    });
-
+    const rin = ind.rin || (idx + 1);
     return {
-      metadata: {
-        interviewId: `MZ11-${Date.now().toString().slice(-4)}`,
-        intervieweeName: processed[0]?.fullName || "Entrevistado Principal",
-        interviewDate: new Date().toLocaleDateString(),
-        interviewPlace: "",
-        intervieweeRin: "1",
-        totalNames: processed.length
-      },
-      individuals: processed.sort((a: any, b: any) => a.rin - b.rin)
+      ...ind,
+      id: `ind-${rin}-${Date.now()}`,
+      rin,
+      birthPlace: bPlace,
+      deathPlace: dPlace,
+      page: ind.page || Math.floor((rin - 1) / 25) + 1,
+      confidence: 0.95
     };
-  } catch (err: any) {
-    throw new Error(`Erro na extração: ${err.message}`);
-  }
+  });
+
+  return {
+    metadata: {
+      interviewId: `MZ11-${Date.now().toString().slice(-4)}`,
+      intervieweeName: processed[0]?.fullName || "Principal",
+      interviewDate: new Date().toLocaleDateString(),
+      interviewPlace: "",
+      intervieweeRin: "1",
+      totalNames: processed.length
+    },
+    individuals: processed
+  };
 };
